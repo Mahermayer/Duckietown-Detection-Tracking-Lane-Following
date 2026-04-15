@@ -50,6 +50,7 @@ os.environ.setdefault("YOLO_WEIGHTS", str(REPO_ROOT / "weight" / "yolo.pt"))
 os.environ.setdefault("SEG_WEIGHTS", str(REPO_ROOT / "weight" / "segment_depthwise_se.pth"))
 
 import lane_pipeline as lf
+from visual import viz_lane_follow
 
 
 class LocalInferenceNode(DTROS):
@@ -60,9 +61,18 @@ class LocalInferenceNode(DTROS):
         self.safe_speed = float(rospy.get_param("~safe_speed", os.environ.get("SAFE_SPEED", "0.0")))
         self.log_period = float(rospy.get_param("~log_period", os.environ.get("LOCAL_LOG_PERIOD", "5.0")))
         self.publish_safe_on_error = _param_bool("~publish_safe_on_error", True)
+        self.publish_debug_image = _param_bool(
+            "~publish_debug_image",
+            os.environ.get("PUBLISH_DEBUG_IMAGE", "1"),
+        )
+        self.debug_jpeg_quality = int(rospy.get_param(
+            "~debug_jpeg_quality",
+            os.environ.get("DEBUG_JPEG_QUALITY", "70"),
+        ))
 
         self._vehicle_name = os.environ.get("VEHICLE_NAME", "duckiebot")
         self._camera_topic = f"/{self._vehicle_name}/camera_node/image/compressed"
+        self._debug_topic = f"/{self._vehicle_name}/local_inference/debug/compressed"
         self._bridge = CvBridge()
         self._latest_image = None
         self._frame_counter = 0
@@ -74,6 +84,11 @@ class LocalInferenceNode(DTROS):
         self.vel_pub = rospy.Publisher(
             f"/{self._vehicle_name}/car_cmd_switch_node/cmd",
             Twist2DStamped,
+            queue_size=1,
+        )
+        self.debug_pub = rospy.Publisher(
+            self._debug_topic,
+            CompressedImage,
             queue_size=1,
         )
         self.img_sub = rospy.Subscriber(
@@ -91,6 +106,8 @@ class LocalInferenceNode(DTROS):
             self.frame_rate,
             os.path.basename(os.environ["SEG_WEIGHTS"]),
         )
+        if self.publish_debug_image:
+            rospy.loginfo("Debug image topic: %s", self._debug_topic)
 
     def _camera_cb(self, msg):
         self._latest_image = msg
@@ -126,6 +143,24 @@ class LocalInferenceNode(DTROS):
             elapsed,
         )
 
+    def _publish_debug_frame(self, frame, header):
+        if not self.publish_debug_image:
+            return
+
+        ok, buf = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), self.debug_jpeg_quality],
+        )
+        if not ok:
+            return
+
+        msg = CompressedImage()
+        msg.header = header
+        msg.format = "jpeg"
+        msg.data = buf.tobytes()
+        self.debug_pub.publish(msg)
+
     def run(self):
         rate = rospy.Rate(self.frame_rate)
 
@@ -158,6 +193,18 @@ class LocalInferenceNode(DTROS):
                 self._last_v = float(v)
                 self._last_omega = float(omega)
                 self.publish_cmd(self._last_v, self._last_omega)
+                debug_frame = viz_lane_follow(
+                    rs_bgr,
+                    boxes,
+                    seg,
+                    err_px,
+                    self._last_v,
+                    self._last_omega,
+                    mode=mode,
+                    show_mode=True,
+                    tracked_objs=tracked_objs,
+                )
+                self._publish_debug_frame(debug_frame, msg.header)
                 self._log_status(frame_id, self._last_v, self._last_omega, mode, time.time() - start)
 
             except Exception as exc:

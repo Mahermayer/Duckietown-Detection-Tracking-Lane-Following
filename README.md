@@ -80,17 +80,36 @@ Useful on-board inference environment variables:
 ```bash
 LOCAL_FRAME_RATE=5.0
 LOCAL_LOG_PERIOD=5.0
+PUBLISH_DEBUG_IMAGE=1
+DEBUG_JPEG_QUALITY=70
 LANE_VERBOSE=0
 YOLO_WEIGHTS=weight/yolo.pt
 SEG_WEIGHTS=weight/segment_depthwise_se.pth
 ```
 
 The local node keeps logs minimal. It reports startup once and throttles runtime status logs.
+It also publishes the detection/tracking/segmentation overlay for `rqt_image_view`:
+
+```text
+/<vehicle-name>/local_inference/debug/compressed
+```
+
+For example:
+
+```text
+/ruks007/local_inference/debug/compressed
+```
+
+Disable the debug image stream if on-board inference is too slow:
+
+```bash
+PUBLISH_DEBUG_IMAGE=0 dts devel run -H ruks007
+```
 
 For direct on-vehicle ROS testing inside the Duckietown shell/container:
 
 ```bash
-rosrun my_package vehicle_local_inference.py _frame_rate:=5.0 _log_period:=5.0
+rosrun my_package vehicle_local_inference.py _frame_rate:=5.0 _log_period:=5.0 _publish_debug_image:=true
 ```
 
 ### Remote GPU Mode

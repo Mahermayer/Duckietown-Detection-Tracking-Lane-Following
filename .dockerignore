@@ -15,6 +15,7 @@
 !weight/**
 !lane_pipeline.py
 !lane_constants.py
+!visual.py
 !launchers/
 !launchers/**
 

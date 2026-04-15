@@ -69,7 +69,7 @@ COPY ./packages "${REPO_PATH}/"
 COPY ./ByteTrack "${REPO_PATH}/ByteTrack"
 COPY ./segmentation "${REPO_PATH}/segmentation"
 COPY ./weight "${REPO_PATH}/weight"
-COPY ./lane_pipeline.py ./lane_constants.py "${REPO_PATH}/"
+COPY ./lane_pipeline.py ./lane_constants.py ./visual.py "${REPO_PATH}/"
 
 # build packages
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
