@@ -1,4 +1,4 @@
-# iCPS Duckietown Detection, Tracking, and Lane Control (GPU Server)
+# iCPS Duckietown Detection, Tracking, and Lane Control 
 
 This project provides a **centralized perception and control system** for multiple Duckiebots using a remote GPU server.
 
@@ -12,6 +12,10 @@ Duckiebots send RGB camera frames to a GPU server over TCP, where the server pro
 The server then sends **motion commands** (velocity `v` and angular velocity `omega`) back to each vehicle.
 
 ---
+
+## Perception and Control Pipeline
+
+![System Pipeline](assets/pipeline.png)
 
 ## How It Works
 
