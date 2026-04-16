@@ -2,10 +2,10 @@
 
 This project provides a **centralized perception and control system** for multiple Duckiebots using a remote GPU server.
 
-Duckiebots send camera frames to a GPU server over TCP, where the server processes them using:
+Duckiebots send RGB camera frames to a GPU server over TCP, where the server processes them using:
 
-- YOLO for object detection
-- U-Net for lane segmentation  
+- YOLO for object detection (YOLOv8n)
+- Lightweight U-Net (LaneNet) for lane segmentation (https://github.com/Mahermayer/Lane-Segmentation)
 - ByteTrack for vehicle tracking
 - PID/FSM for control decisions
 
@@ -64,7 +64,7 @@ packages/my_package/src/
    GPU_SERVER_HOST=0.0.0.0
    GPU_SERVER_PORT=5001
    
-   SHOW_GUI=0                              # Turn off for production
+   SHOW_GUI=0                              # Turn off for multiple vehicle
    LANE_VERBOSE=0
    
    SEG_WEIGHTS=weight/segment_depthwise_se.pth
@@ -103,7 +103,7 @@ packages/my_package/src/
 
 1. Start one GPU server instance
 2. Launch each Duckiebot pointing to the same `GPU_SERVER_IP`
-3. Set frame rate lower per vehicle: `export GPU_FRAME_RATE=8`
+3. Set frame rate lower per vehicle: `export GPU_FRAME_RATE=5`
 
 **Optimal Settings:**
 - `SHOW_GUI=0`
@@ -117,18 +117,13 @@ Performance depends heavily on network quality:
 **Recommended conditions:**
 - Latency < 20 ms
 - Jitter < 10–20 ms
-- Minimal packet loss
-
-Poor network conditions cause:
-- Delayed control responses
-- Dropped connections
 
 ---
 
 ## Key Points
 
 - Uses **centralized GPU inference** for efficiency across multiple vehicles
+- Integration of lightweight LaneNet for real-time lane segmentation
 - Lightweight **TCP protocol** for low-latency control
 - Scales to multiple vehicles on stable networks
 - Default model weights included in the `weight/` directory
-- Generated files (logs, caches, outputs) are automatically excluded from version control
