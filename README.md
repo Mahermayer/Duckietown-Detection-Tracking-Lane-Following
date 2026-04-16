@@ -34,13 +34,13 @@ The system handles **multiple vehicles simultaneously** by routing frames based 
 ```
 packages/my_package/src/
 ├── vehicle_client.py              # Client that runs on each Duckiebot
-├── gpu_server.py                  # Server handling multiple clients  
+├── gpu_server.py                  # Server handling multiple clients inference  
 ├── lane_pipeline.py               # Perception and control logic
 ├── visual.py                      # Visualization tools
-├── lane_constants.py              # Shared configuration
-├── segmentation/                  # Lane segmentation models
+├── lane_constants.py              # Shared configuration (i.e., class labels, logging)
+├── segmentation/                  # LaneNet segmentation models
 ├── ByteTrack/yolox/tracker/       # Multi-object tracking implementation
-└── weight/                        # Pre-trained model files
+└── weight/                        # Pre-trained model files for object detection (YOLOv8n) and segmentation (LaneNet)
 ```
 
 ---
@@ -142,5 +142,4 @@ packages/my_package/src/
 - Uses **centralized GPU inference** for efficiency across multiple vehicles
 - Integration of lightweight LaneNet for real-time lane segmentation
 - Lightweight **TCP protocol** for low-latency control
-- Scales to multiple vehicles on stable networks
 - Default model weights included in the `weight/` directory
