@@ -31,8 +31,6 @@ def _log(message):
         print(message, flush=True)
 
 
-BOT_ARRIVALS   = {}   # track_id -> first time seen near its stop line
-BOT_LAST_SEEN  = {}   # track_id -> last time seen anywhere
 BOT_STALE_SEC  = 6.0  # drop a bot if not seen for this many seconds
 
 
@@ -50,7 +48,8 @@ byte_cfg = {
     'track_buffer': 5,
     'mot20': False
 }
-_tracker = BYTETracker(args=type("ByteArgs", (), byte_cfg)())
+def _make_tracker():
+    return BYTETracker(args=type("ByteArgs", (), byte_cfg)())
 # ===========================================================================
 
 
@@ -106,14 +105,31 @@ LANE_INNER_WIDTH_M = 0.2032
 # ===========================================================================
 
 
-_pending_row = None
 _t0 = time.monotonic()
 
 
-def pop_pending_row():
-    global _pending_row
-    row = _pending_row
-    _pending_row = None
+class InferenceContext:
+    """Per-stream state so multiple vehicles do not share tracker/lane memory."""
+
+    def __init__(self):
+        self.tracker = _make_tracker()
+        self.last_lane_w = 400.0
+        self.last_err = 0.0
+        self.last_lane_cx = 320.0
+        self.pending_row = None
+
+
+_default_context = InferenceContext()
+
+
+def clone_inference_context():
+    return InferenceContext()
+
+
+def pop_pending_row(context=None):
+    ctx = context if context is not None else _default_context
+    row = ctx.pending_row
+    ctx.pending_row = None
     return row
 
 
@@ -124,7 +140,7 @@ def clone_follower():
 
 # ======================== INTERSECTION HELPER ================================
 # ======================== INTERSECTION HELPER ================================
-def other_bots_in_intersection(tracked_objs, img_h, my_arrival_time):
+def other_bots_in_intersection(tracked_objs, img_h, my_arrival_time, bot_arrivals, bot_last_seen):
     """
     FCFS intersection logic (for THIS bot):
 
@@ -137,8 +153,6 @@ def other_bots_in_intersection(tracked_objs, img_h, my_arrival_time):
         img_h           : image height
         my_arrival_time : time.time() when *this* bot entered INTERSECTION_WAIT
     """
-    global BOT_ARRIVALS, BOT_LAST_SEEN
-
     if tracked_objs is None or len(tracked_objs) == 0:
         _log("[INT] No tracked bots; intersection clear")
         return False
@@ -154,23 +168,23 @@ def other_bots_in_intersection(tracked_objs, img_h, my_arrival_time):
         x, y, w, h = map(int, obj.tlwh)
         cy = y + h / 2.0
 
-        BOT_LAST_SEEN[tid] = now
+        bot_last_seen[tid] = now
 
         # If bot is clearly near its own stop line, give/keep an arrival timestamp
         if h >= wait_thr:
-            if tid not in BOT_ARRIVALS:
-                BOT_ARRIVALS[tid] = now
-                _log(f"[INT] Bot {tid} arrival recorded at {BOT_ARRIVALS[tid]:.2f} (h={h} >= {wait_thr:.1f})")
+            if tid not in bot_arrivals:
+                bot_arrivals[tid] = now
+                _log(f"[INT] Bot {tid} arrival recorded at {bot_arrivals[tid]:.2f} (h={h} >= {wait_thr:.1f})")
         # If not in the stop-line region, we DON'T erase its arrival_time:
         # it might have just started moving; crossing is handled separately.
 
     # --- Prune stale bots that disappeared for too long ---
-    stale_ids = [tid for tid, t_last in BOT_LAST_SEEN.items()
+    stale_ids = [tid for tid, t_last in bot_last_seen.items()
                  if now - t_last > BOT_STALE_SEC]
     for tid in stale_ids:
         _log(f"[INT] Removing stale bot {tid}")
-        BOT_LAST_SEEN.pop(tid, None)
-        BOT_ARRIVALS.pop(tid, None)
+        bot_last_seen.pop(tid, None)
+        bot_arrivals.pop(tid, None)
 
     # --- 1) If ANY bot is crossing the intersection center → we must wait ---
     for obj in tracked_objs:
@@ -188,7 +202,7 @@ def other_bots_in_intersection(tracked_objs, img_h, my_arrival_time):
         _log("[INT][WARN] my_arrival_time is None; treating as latest arrival")
         my_arrival_time = now
 
-    for tid, arr_t in BOT_ARRIVALS.items():
+    for tid, arr_t in bot_arrivals.items():
         if arr_t < my_arrival_time - 1e-3:   # small epsilon
             # Someone was in the stop region before we were
             _log(f"[INT] Bot {tid} arrived earlier ({arr_t:.2f} < my {my_arrival_time:.2f}); yielding")
@@ -202,15 +216,22 @@ def other_bots_in_intersection(tracked_objs, img_h, my_arrival_time):
 
 # ============================ INFERENCE =====================================
 @torch.no_grad()
-def infer(frame_bgr):
+def infer(frame_bgr, context=None):
     """
     Returns:
       err_px, lane_w_px, boxes[N,6], seg(4x640x640),
       resized_img, fallback_one_way, mode, tracked_objs
     """
-    img = cv2.resize(frame_bgr, (640, 640))
+    ctx = context if context is not None else _default_context
+    if frame_bgr.shape[:2] == (640, 640):
+        img = frame_bgr
+    else:
+        img = cv2.resize(frame_bgr, (640, 640))
     seg_h, seg_w = map(int, _seg_input_size)
-    seg_img = cv2.resize(img, (seg_w, seg_h), interpolation=cv2.INTER_LINEAR)
+    if (img.shape[1], img.shape[0]) == (seg_w, seg_h):
+        seg_img = img
+    else:
+        seg_img = cv2.resize(img, (seg_w, seg_h), interpolation=cv2.INTER_LINEAR)
     rgb = cv2.cvtColor(seg_img, cv2.COLOR_BGR2RGB)
     t = torch.from_numpy(rgb.transpose(2, 0, 1)[None]).float().to(_device)
     if _seg_normalize_01:
@@ -242,37 +263,42 @@ def infer(frame_bgr):
     # YOLO detection
     dets = _yolo.predict(img, conf=0.25, imgsz=320, verbose=False)[0]
 
-    boxes = []
-    for b in dets.boxes:
-        x1,y1,x2,y2 = map(int, b.xyxy[0])
-        boxes.append([x1,y1,x2,y2,int(b.cls[0]),float(b.conf[0])])
-    boxes = np.array(boxes, dtype=np.float32) if len(boxes)>0 else np.zeros((0,6),np.float32)
+    yolo_boxes = dets.boxes
+    if len(yolo_boxes):
+        xyxy = yolo_boxes.xyxy.cpu().numpy().astype(np.float32, copy=False)
+        cls_np = yolo_boxes.cls.cpu().numpy().astype(np.int32, copy=False)
+        conf_np = yolo_boxes.conf.cpu().numpy().astype(np.float32, copy=False)
+        boxes = np.column_stack((xyxy, cls_np.astype(np.float32), conf_np)).astype(np.float32, copy=False)
+    else:
+        xyxy = np.zeros((0, 4), dtype=np.float32)
+        cls_np = np.zeros((0,), dtype=np.int32)
+        conf_np = np.zeros((0,), dtype=np.float32)
+        boxes = np.zeros((0, 6), np.float32)
 
     # BYTE TRACK input (★ FIXED: track ONLY Bot class ★)
     try:
         img_h, img_w = img.shape[:2]
 
         # Extract raw YOLO detections
-        if len(dets.boxes):
-            cls_np  = dets.boxes.cls.cpu().numpy()
-            bot_mask = (cls_np == 0)
+        if len(yolo_boxes):
+            bot_mask = cls_np == 0
 
             # Debug: show raw detection counts
             #print(f"[BT] YOLO raw counts: Bots={np.sum(bot_mask)}, Total={len(cls_np)}")
 
             # Track only Bots
             if np.any(bot_mask):
-                xyxy = dets.boxes.xyxy.cpu().numpy()[bot_mask]
-                conf = dets.boxes.conf.cpu().numpy()[bot_mask].reshape(-1, 1)
-                det_arr = np.concatenate([xyxy, conf], axis=1).astype(np.float32)
-                det_tensor = torch.from_numpy(det_arr).float().cpu()
+                bot_xyxy = xyxy[bot_mask]
+                bot_conf = conf_np[bot_mask].reshape(-1, 1)
+                det_arr = np.concatenate([bot_xyxy, bot_conf], axis=1).astype(np.float32, copy=False)
+                det_tensor = torch.from_numpy(det_arr)
             else:
                 det_tensor = torch.zeros((0, 5), dtype=torch.float32)
         else:
             det_tensor = torch.zeros((0, 5), dtype=torch.float32)
 
         # Update tracker
-        tracked_objs = _tracker.update(det_tensor, (img_h, img_w), (img_h, img_w))
+        tracked_objs = ctx.tracker.update(det_tensor, (img_h, img_w), (img_h, img_w))
 
         # Debug: print track info
         #print(f"[BT] Active tracks: {len(tracked_objs)}")
@@ -299,18 +325,11 @@ def infer(frame_bgr):
     wx = float(np.median(w_pts[:,0,0])) if w_pts is not None else np.nan
 
     # lane width memory
-    if not hasattr(infer, "last_lane_w"):
-        infer.last_lane_w = 400
-    if not hasattr(infer, "last_err"):
-        infer.last_err = 0
-    if not hasattr(infer, "last_lane_cx"):
-        infer.last_lane_cx = cx_img
-
     if not np.isnan(yx) and not np.isnan(wx):
         lane_w_px = abs(wx - yx)
-        infer.last_lane_w = 0.8*infer.last_lane_w + 0.2*lane_w_px
+        ctx.last_lane_w = 0.8 * ctx.last_lane_w + 0.2 * lane_w_px
     else:
-        lane_w_px = infer.last_lane_w
+        lane_w_px = ctx.last_lane_w
 
     # lane center logic
     if not np.isnan(yx) and not np.isnan(wx):
@@ -324,20 +343,19 @@ def infer(frame_bgr):
         mode = "one-way-right"
     else:
         # both missing
-        if abs(infer.last_err) < 5:
+        if abs(ctx.last_err) < 5:
             lane_cx = cx_img
             mode = "memory"
         else:
-            alpha = np.clip(0.05 + 0.002*abs(infer.last_err), 0.1, 0.6)
-            lane_cx = (1-alpha)*infer.last_lane_cx + alpha*cx_img
+            alpha = np.clip(0.05 + 0.002 * abs(ctx.last_err), 0.1, 0.6)
+            lane_cx = (1 - alpha) * ctx.last_lane_cx + alpha * cx_img
             mode = "memory"
 
     err_px = lane_cx - cx_img
-    infer.last_err = err_px
-    infer.last_lane_cx = lane_cx
+    ctx.last_err = err_px
+    ctx.last_lane_cx = lane_cx
     err_m = (float(err_px) / float(lane_w_px)) * LANE_INNER_WIDTH_M if lane_w_px else math.nan
-    global _pending_row
-    _pending_row = {
+    ctx.pending_row = {
         "t_s": time.monotonic() - _t0,
         "err_px": float(err_px),
         "err_m": float(err_m),
@@ -379,6 +397,8 @@ class LaneFollower:
 
         # FCFS: when did *we* arrive at the intersection stop line?
         self.my_arrival_time = None
+        self.bot_arrivals = {}
+        self.bot_last_seen = {}
 
     # --------------------------- TRAFFIC LIGHT HELPER ------------------------
     def _find_tl_box(self, boxes):
@@ -410,7 +430,13 @@ class LaneFollower:
                 return 0.0, 0.0
 
             # any other bot with earlier arrival or currently crossing?
-            conflict = other_bots_in_intersection(tracked_objs, h_img, self.my_arrival_time)
+            conflict = other_bots_in_intersection(
+                tracked_objs,
+                h_img,
+                self.my_arrival_time,
+                self.bot_arrivals,
+                self.bot_last_seen,
+            )
             if conflict:
                 return 0.0, 0.0
 

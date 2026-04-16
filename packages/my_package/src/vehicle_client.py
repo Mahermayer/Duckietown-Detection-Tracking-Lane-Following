@@ -21,6 +21,10 @@ from cv_bridge import CvBridge
 
 SERVER_IP = os.environ.get("GPU_SERVER_IP", "127.0.0.1")
 PORT = int(os.environ.get("GPU_SERVER_PORT", "5001"))
+REPLY_TIMEOUT_DEFAULT = float(os.environ.get("GPU_REPLY_TIMEOUT", "5.0"))
+RECONNECT_BACKOFF_INITIAL = float(os.environ.get("GPU_RECONNECT_BACKOFF_INITIAL", "0.2"))
+RECONNECT_BACKOFF_MAX = float(os.environ.get("GPU_RECONNECT_BACKOFF_MAX", "1.5"))
+POST_ERROR_SLEEP = float(os.environ.get("GPU_POST_ERROR_SLEEP", "0.2"))
 
 
 class CameraReaderNode(DTROS):
@@ -29,7 +33,8 @@ class CameraReaderNode(DTROS):
 
         # --- core params ---
         self.frame_rate = float(rospy.get_param("~frame_rate", 15.0))
-        self.sock_timeout = float(rospy.get_param("~sock_timeout", 2.0))
+        self.sock_timeout = float(rospy.get_param("~sock_timeout", 5.0))
+        self.reply_timeout = float(rospy.get_param("~reply_timeout", REPLY_TIMEOUT_DEFAULT))
         self.receiver_ip = rospy.get_param("~gpu_ip", SERVER_IP)
         self.port = int(rospy.get_param("~gpu_port", PORT))
         self.wait_for_ack = rospy.get_param("~wait_for_ack", True)
@@ -55,8 +60,9 @@ class CameraReaderNode(DTROS):
         # --- networking state ---
         self._sock = None
         self._connected = False
-        self._reconnect_backoff = 0.5
-        self._reconnect_backoff_max = 5.0
+        self._reconnect_backoff = RECONNECT_BACKOFF_INITIAL
+        self._reconnect_backoff_max = RECONNECT_BACKOFF_MAX
+        self._rx_buffer = b""
 
         # --- runtime state ---
         self.latest_image = None
@@ -68,6 +74,19 @@ class CameraReaderNode(DTROS):
             "CameraReaderNode initialized frame_rate=%.1f wait_for_ack=%s",
             self.frame_rate,
             self.wait_for_ack,
+        )
+        rospy.loginfo(
+            "GPU target=%s:%d sock_timeout=%.1fs reply_timeout=%.1fs",
+            self.receiver_ip,
+            self.port,
+            self.sock_timeout,
+            self.reply_timeout,
+        )
+        rospy.loginfo(
+            "Reconnect backoff initial=%.2fs max=%.2fs post_error_sleep=%.2fs",
+            self._reconnect_backoff,
+            self._reconnect_backoff_max,
+            POST_ERROR_SLEEP,
         )
 
     # -------------------------------------------------
@@ -93,6 +112,7 @@ class CameraReaderNode(DTROS):
                 pass
         self._sock = None
         self._connected = False
+        self._rx_buffer = b""
 
         while not rospy.is_shutdown():
             try:
@@ -112,7 +132,7 @@ class CameraReaderNode(DTROS):
                 rospy.loginfo("TCP connected to %s:%d", self.receiver_ip, self.port)
 
                 # reset backoff on success
-                self._reconnect_backoff = 0.5
+                self._reconnect_backoff = RECONNECT_BACKOFF_INITIAL
                 return
             except Exception as e:
                 rospy.logwarn_throttle(
@@ -126,6 +146,28 @@ class CameraReaderNode(DTROS):
                     self._reconnect_backoff_max,
                     self._reconnect_backoff * 1.5,
                 )
+
+    def _recv_reply_line(self) -> str:
+        """Read exactly one newline-terminated ASCII reply line."""
+        deadline = time.time() + self.reply_timeout
+        while True:
+            if b"\n" in self._rx_buffer:
+                line, self._rx_buffer = self._rx_buffer.split(b"\n", 1)
+                return line.decode("ascii").strip()
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise RuntimeError("recv timeout/no full line")
+
+            try:
+                self._sock.settimeout(remaining)
+                chunk = self._sock.recv(256)
+            except (socket.timeout, OSError) as e:
+                raise RuntimeError(f"recv timeout/no data: {e}")
+
+            if not chunk:
+                raise RuntimeError("empty reply from server")
+            self._rx_buffer += chunk
 
     # -------------------------------------------------
     # send frame, wait for reply, send stats
@@ -157,19 +199,13 @@ class CameraReaderNode(DTROS):
             return 0.0, 0.0, 0.0
 
         try:
-            # short timeout for reply so we don't hang
-            self._sock.settimeout(2.0)
-            raw_reply = self._sock.recv(128)
-        except (socket.timeout, OSError) as e:
-            raise RuntimeError(f"recv timeout/no data: {e}")
-
-        t_recv = time.time()
-
-        if not raw_reply:
-            raise RuntimeError("empty reply from server")
+            reply_line = self._recv_reply_line()
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"recv failed: {e}")
 
         try:
-            reply_line = raw_reply.decode("ascii").strip()
             parts = reply_line.split(",", 5)
             if len(parts) != 6:
                 raise ValueError(f"malformed reply: {reply_line!r}")
@@ -300,7 +336,7 @@ class CameraReaderNode(DTROS):
                 self._connected = False
 
                 # give server time to kill its side cleanly
-                time.sleep(0.8)
+                time.sleep(POST_ERROR_SLEEP)
 
                 # reconnect on next loop iteration
                 continue
@@ -313,7 +349,7 @@ class CameraReaderNode(DTROS):
                     e,
                 )
                 self.publish_stop()
-                time.sleep(0.8)
+                time.sleep(POST_ERROR_SLEEP)
                 self._connected = False
                 if self._sock:
                     try:

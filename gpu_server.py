@@ -18,11 +18,13 @@ PORT = int(os.environ.get("GPU_SERVER_PORT", "5001"))
 HOST = os.environ.get("GPU_SERVER_HOST", "0.0.0.0")
 SHOW_GUI = os.environ.get("SHOW_GUI", "1") == "1"
 SAFE_SPEED = float(os.environ.get("SAFE_SPEED", "0.1"))
-SOCKET_TIMEOUT = float(os.environ.get("SERVER_SOCKET_TIMEOUT", "10.0"))
+SOCKET_TIMEOUT = float(os.environ.get("SERVER_SOCKET_TIMEOUT", "30.0"))
 
 frame_qs = {}
 followers = {}
+infer_contexts = {}
 frame_qs_lock = threading.Lock()
+state_lock = threading.Lock()
 
 
 def _close_socket(conn):
@@ -50,10 +52,13 @@ class GpuLaneServer:
         except Exception as exc:
             print(f"[net] failed to send safe reply: {exc}", flush=True)
 
-    def _get_follower(self, vehicle):
-        if vehicle not in followers:
-            followers[vehicle] = lf.clone_follower()
-        return followers[vehicle]
+    def _get_vehicle_state(self, vehicle):
+        with state_lock:
+            if vehicle not in followers:
+                followers[vehicle] = lf.clone_follower()
+            if vehicle not in infer_contexts:
+                infer_contexts[vehicle] = lf.clone_inference_context()
+            return followers[vehicle], infer_contexts[vehicle]
 
     def handle_client(self, conn, addr):
         client_ip = addr[0]
@@ -61,6 +66,8 @@ class GpuLaneServer:
 
         last_v, last_omega = 0.0, 0.0
         session_vehicle = None
+        follower = None
+        infer_context = None
         conn.settimeout(SOCKET_TIMEOUT)
         fp = conn.makefile("rb")
 
@@ -90,6 +97,7 @@ class GpuLaneServer:
 
                 if session_vehicle is None:
                     session_vehicle = vehicle
+                    follower, infer_context = self._get_vehicle_state(session_vehicle)
                     with frame_qs_lock:
                         frame_qs.setdefault(session_vehicle, deque(maxlen=2))
                     print(f"[bind] {client_ip} -> veh_name={session_vehicle}", flush=True)
@@ -106,20 +114,20 @@ class GpuLaneServer:
                     self._send_safe_reply(conn, session_vehicle or vehicle, frame_id, last_v, last_omega)
                     continue
 
-                img = cv2.resize(img, (640, 640))
                 t_server = time.time()
 
                 with self.infer_lock:
                     try:
-                        err_px, lane_w_px, boxes, seg, rs_bgr, fb, mode, tracked_objs = lf.infer(img)
+                        err_px, lane_w_px, boxes, seg, rs_bgr, fb, mode, tracked_objs = lf.infer(
+                            img, context=infer_context
+                        )
                         infer_error = False
                     except Exception as exc:
                         print(f"[infer] error on frame {frame_id}: {exc}", flush=True)
                         err_px, lane_w_px = math.nan, math.nan
-                        boxes, seg, rs_bgr, fb, mode, tracked_objs = [], None, img, True, "error", []
+                        boxes, seg, rs_bgr, fb, mode, tracked_objs = [], None, cv2.resize(img, (640, 640)), True, "error", []
                         infer_error = True
 
-                follower = self._get_follower(session_vehicle)
                 try:
                     if infer_error:
                         v, omega = SAFE_SPEED, last_omega
