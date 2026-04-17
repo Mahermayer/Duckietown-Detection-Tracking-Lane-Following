@@ -15,7 +15,7 @@ The server then sends **motion commands** (velocity `v` and angular velocity `om
 
 ## Perception and Control Pipeline
 
-![System Pipeline](assets/pipeline.png)
+![System Pipeline](pipeline.png)
 
 ## How It Works
 
