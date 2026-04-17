@@ -1,4 +1,4 @@
-# iCPS Duckietown Detection, Tracking, and Lane Control 
+# Duckietown Detection, Tracking, and Lane Control 
 
 This project provides a **centralized perception and control system** for multiple Duckiebots using a remote GPU server.
 
